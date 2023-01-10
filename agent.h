@@ -19,6 +19,8 @@
 #include "board.h"
 #include "action.h"
 
+#define UCB_WEIGHT 0.25
+
 class agent {
 public:
 	agent(const std::string& args = "") {
@@ -123,19 +125,17 @@ public:
 	class node : board { //
 	public:
 		node(const board& state, node* parent = nullptr) : board(state),
-			win(0), visit(0), child(), parent(parent) {}
+			win(0.5), visit(20), rave_win(0.5), rave_visit(20), child(), parent(parent) {}
 
 		/**
 		 * run MCTS for N cycles and retrieve the best action
 		 */
 		action run_mcts(size_t N, std::default_random_engine& engine) {
-			std::unordered_map<board::piece_type, std::unordered_map<int, int>> rave_win;
-			std::unordered_map<board::piece_type, std::unordered_map<int, int>> rave_visit;
 			for (size_t i = 0; i < N; i++) {
-				std::vector<node*> path = select(rave_win, rave_visit);
-				node* leaf = path.back()->expand(engine);.
+				std::vector<node*> path = select();
+				node* leaf = path.back()->expand(engine);
 				if (leaf != path.back()) path.push_back(leaf);
-				update(path, leaf->simulate(engine), rave_win, rave_visit);
+				update(path, leaf->simulate(engine));
 			}
 			return take_action();
 		}
@@ -146,15 +146,13 @@ public:
 		 * select from the current node to a leaf node by UCB and return all of them
 		 * a leaf node can be either a node that is not fully expanded or a terminal node
 		 */
-		std::vector<node*> select(
-			std::unordered_map<board::piece_type, std::unordered_map<int, int>> rave_win,
-			std::unordered_map<board::piece_type, std::unordered_map<int, int>> rave_visit) {
+		std::vector<node*> select() {
 			std::vector<node*> path = { this };
+			node* ndptr = this;
 			while(ndptr->is_selectable()){
 				ndptr = &*std::max_element(ndptr->child.begin(), ndptr->child.end(),
-						[=](const node& lhs, const node& rhs) { return lhs.ucb_score(rave_win, rave_visit) < 
-																	   rhs.ucb_score(rave_win, rave_visit); });
-				path.push_back(ndptr)
+						[=](const node& lhs, const node& rhs) { return lhs.ucb_score() < rhs.ucb_score(); });
+				path.push_back(ndptr);
 			}
 			return path;
 		}
@@ -192,28 +190,19 @@ public:
 		/**
 		 * update statistics for all nodes saved in the path
 		 */
-		void update(std::vector<node*>& path, unsigned winner, 
-			std::unordered_map<board::piece_type, std::unordered_map<int, int>> &rave_win,
-			std::unordered_map<board::piece_type, std::unordered_map<int, int>> &rave_visit) {
+		void update(std::vector<node*>& path, unsigned winner) {
 			for (node* ndptr : path) {
-				ndptr->win += (winner == info().who_take_turns) ? 1 : 0;
-				ndptr->visit += 1;
-				update_rave(ndptr, winner, rave_win, rave_visit);
+				size_t point = (winner == info().who_take_turns) ? 1 : 0;
+				ndptr->win = (ndptr->win*ndptr->visit + point) / (ndptr->visit + 1);
+				ndptr->visit+=1;
+				size_t child_point = 1 - point;
+				if(ndptr->child.size() != 0){
+					for (auto &c : ndptr->child){
+						c.rave_win = (c.rave_win*c.rave_visit + child_point) / (c.rave_visit + 1.0);
+						c.rave_visit++;
+					}
+				}
 			}
-		}
-
-		void update_rave(node* ndptr, int winner,
-				std::unordered_map<board::piece_type, std::unordered_map<int, int>> &rave_win,
-				std::unordered_map<board::piece_type, std::unordered_map<int, int>> &rave_visit) {
-			// update rave value
-			board::piece_type color = ndptr.info().who_take_turns;
-			int move = ndptr.info().last_move_index;
-			if (rave_win.count(who) == 0) rave_win[color] = std::unordered_map<size_t, float>();
-			if (rave_win[color].count(move) == 0) rave_win[color][move] = 0;
-			if (winner == color) {
-				rave_win[color][move]++;
-			}
-			rave_visit[color][move]++;
 		}
 
 		/**
@@ -245,16 +234,9 @@ public:
 		/**
 		 * get the ucb score of this node
 		 */
-		float ucb_score(float c = std::sqrt(2),
-			std::unordered_map<board::piece_type, std::unordered_map<int, int>> rave_win,
-			std::unordered_map<board::piece_type, std::unordered_map<int, int>> rave_visit) const {
-			board::piece_type color = info().who_take_turns;
-			int move = info().last_move_index;
-			float numerator = float(rave_win[color][move]) + float(win) + std::sqrt(log_visits_ * child.visits_) * c;
-			float denominator = visit + rave_visit[color][move];
-			//float exploit = float(win) / visit;
-			//float explore = std::sqrt(std::log(parent->visit) / visit);
-			return numerator / denominator;
+		float ucb_score() const {
+			double ret = rave_win*rave_visit + win*visit +  std::sqrt(std::log(parent->visit) * visit ) * UCB_WEIGHT;
+			return ret / (visit+rave_visit);
 		}
 
 		/**
@@ -272,7 +254,7 @@ public:
 		}
 
 	private:
-		size_t win, visit, rave_win, rave_visit;
+		double win, visit, rave_win, rave_visit;
 		std::vector<node> child;
 		node* parent;
 	};
